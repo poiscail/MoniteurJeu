@@ -272,7 +272,9 @@ sealed class App : ApplicationContext
     Fps fps; Overlay overlay;
     DateTime sStart; float sFps, sCpuTMax, sGpuTMax; int sFpsN, sThrottle, sAlerts;
 
-    StatsForm form; Form settings;
+    Dashboard form; SettingsForm settings;
+    public bool Admin { get { return admin; } }
+    public bool AutoStartOn { get { return autoStart.Checked; } }
     int iconVal = -2; bool iconGame; IntPtr iconHandle;
 
     public App()
@@ -288,9 +290,10 @@ sealed class App : ApplicationContext
         catch { zones = null; }
         LoadCfg();
 
-        var menu = new ContextMenuStrip();
-        menu.Items.Add("Afficher les statistiques", null, delegate { ShowForm(); });
-        menu.Items.Add("Historique (graphiques)", null, delegate { History.Open(HistDir); });
+        var menu = new ContextMenuStrip { Renderer = new DarkMenu(), ShowImageMargin = false, ShowCheckMargin = true, Font = new Font("Segoe UI", 9.5f), Padding = new Padding(2, 6, 2, 6) };
+        menu.HandleCreated += delegate { Theme.SmallCorners(menu.Handle); };
+        menu.Items.Add("Tableau de bord", null, delegate { ShowForm(); });
+        menu.Items.Add("Historique", null, delegate { OpenHistory(); });
         menu.Items.Add("Vider la RAM", null, delegate { CleanRam(); });
         menu.Items.Add("Réglages", null, delegate { ShowSettings(); });
         autoStart = new ToolStripMenuItem("Démarrer avec Windows", null, delegate { ToggleAutoStart(); });
@@ -298,6 +301,7 @@ sealed class App : ApplicationContext
         menu.Items.Add(autoStart);
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("Quitter", null, delegate { Quit(); });
+        foreach (ToolStripItem it in menu.Items) { it.ForeColor = Theme.Text; if (it is ToolStripMenuItem) it.Padding = new Padding(4, 5, 12, 5); }
         tray.ContextMenuStrip = menu;
         tray.MouseClick += delegate(object s, MouseEventArgs e) { if (e.Button == MouseButtons.Left) ShowForm(); };
         tray.Visible = true;
@@ -312,7 +316,7 @@ sealed class App : ApplicationContext
         Native.TrimMemory();
     }
 
-    string CfgFile { get { return Path.Combine(dir, "reglages.ini"); } }
+    public string CfgFile { get { return Path.Combine(dir, "reglages.ini"); } }
     public string HistDir { get { return Path.Combine(dir, "historique"); } }
 
     void LoadCfg()
@@ -586,7 +590,8 @@ sealed class App : ApplicationContext
             using (var g = Graphics.FromImage(bmp))
             using (var sf = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
             {
-                g.Clear(game ? Color.FromArgb(190, 30, 30) : v >= 85 ? Color.FromArgb(200, 120, 0) : Color.FromArgb(25, 25, 25));
+                g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+                Theme.FillRound(g, new RectangleF(0, 0, 15.5f, 15.5f), 4, game ? Theme.Red : v >= 85 ? Color.FromArgb(234, 140, 0) : Color.FromArgb(37, 99, 235));
                 g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.SingleBitPerPixelGridFit;
                 g.DrawString(v.ToString(), iconFont, Brushes.White, new RectangleF(-2, 0, 20, 16), sf);
             }
@@ -600,13 +605,15 @@ sealed class App : ApplicationContext
     void ShowForm()
     {
         if (form != null) { form.Activate(); return; }
-        form = new StatsForm(this);
+        form = new Dashboard(this);
         form.FormClosed += delegate { form.Dispose(); form = null; Native.TrimMemory(); };
         form.Show();
         Tick();
     }
 
-    void CleanRam()
+    public void OpenHistory() { History.Open(HistDir); }
+
+    public void CleanRam()
     {
         if (!admin) { tray.ShowBalloonTip(4000, "MoniteurJeu", "Lance MoniteurJeu en administrateur pour vider la RAM.", ToolTipIcon.Warning); return; }
         ThreadPool.QueueUserWorkItem(delegate
@@ -620,20 +627,17 @@ sealed class App : ApplicationContext
         });
     }
 
-    void ShowSettings()
+    public void ShowSettings()
     {
         if (settings != null) { settings.Activate(); return; }
-        var edit = Reglages.Load(CfgFile);
-        settings = new Form { Text = "MoniteurJeu - Réglages", ClientSize = new Size(460, 420), StartPosition = FormStartPosition.CenterScreen, MinimizeBox = false, MaximizeBox = false };
-        var grid = new PropertyGrid { Dock = DockStyle.Fill, SelectedObject = edit, ToolbarVisible = false, PropertySort = PropertySort.Categorized };
-        var ok = new Button { Text = "Enregistrer", Dock = DockStyle.Bottom, Height = 32 };
-        ok.Click += delegate { edit.Save(CfgFile); Cfg = edit; games = Reglages.List(Cfg.Jeux); settings.Close(); };
-        settings.Controls.Add(grid); settings.Controls.Add(ok);
+        settings = new SettingsForm(this);
         settings.FormClosed += delegate { settings.Dispose(); settings = null; Native.TrimMemory(); };
         settings.Show();
     }
 
-    void ToggleAutoStart()
+    public void ApplyCfg(Reglages r) { r.Save(CfgFile); Cfg = r; games = Reglages.List(Cfg.Jeux); }
+
+    public void ToggleAutoStart()
     {
         if (autoStart.Checked)
         {
@@ -685,37 +689,6 @@ sealed class App : ApplicationContext
     }
 }
 
-// Petit cadre en jeu : transparent aux clics, ne prend jamais le focus, redessiné 1x/s.
-sealed class Overlay : Form
-{
-    readonly App app;
-    readonly Font f = new Font("Consolas", 10f, FontStyle.Bold);
-
-    public Overlay(App a)
-    {
-        app = a;
-        FormBorderStyle = FormBorderStyle.None; ShowInTaskbar = false; TopMost = true;
-        StartPosition = FormStartPosition.Manual; Location = new Point(Screen.PrimaryScreen.Bounds.Left + 8, Screen.PrimaryScreen.Bounds.Top + 8);
-        ClientSize = new Size(140, 54); BackColor = Color.Black; Opacity = 0.75; DoubleBuffered = true;
-    }
-
-    protected override bool ShowWithoutActivation { get { return true; } }
-    protected override CreateParams CreateParams
-    {
-        get { var cp = base.CreateParams; cp.ExStyle |= 0x80000 | 0x20 | 0x80 | 0x08000000; return cp; } // LAYERED | TRANSPARENT | TOOLWINDOW | NOACTIVATE
-    }
-
-    protected override void OnPaint(PaintEventArgs e)
-    {
-        var g = e.Graphics;
-        g.DrawString("FPS " + (app.FpsVal >= 0 ? ((int)app.FpsVal).ToString() : "-"), f, Brushes.White, 4, 2);
-        g.DrawString("CPU " + (int)app.Cpu + "% " + (app.CpuT >= 0 ? (int)app.CpuT + "°" : ""), f, app.CpuThrottle ? Brushes.OrangeRed : Brushes.LightSkyBlue, 4, 18);
-        g.DrawString("GPU " + (app.Gpu >= 0 ? (int)app.Gpu + "% " + (int)app.GpuT + "°" : "-"), f, app.GpuThrottle ? Brushes.OrangeRed : Brushes.LightGreen, 4, 34);
-    }
-
-    protected override void Dispose(bool disposing) { if (disposing) f.Dispose(); base.Dispose(disposing); }
-}
-
 // Page d'historique : générée à la demande à partir des CSV (aucun coût tant qu'on ne l'ouvre pas).
 static class History
 {
@@ -745,7 +718,7 @@ static class History
             rows.Append("</tr>");
         }
 
-        string html = Page.Replace("/*D*/", data.ToString()).Replace("<!--S-->", rows.Length > 0 ? rows.ToString() : "<tr><td colspan=8>Aucune session pour l'instant</td></tr>");
+        string html = Page.Replace("/*D*/", data.ToString()).Replace("<!--S-->", rows.Length > 0 ? rows.ToString() : "<tr><td colspan=8 class=empty>Aucune session pour l'instant</td></tr>");
         string file = Path.Combine(dir, "rapport.html");
         File.WriteAllText(file, html, Encoding.UTF8);
         Process.Start(file);
@@ -769,119 +742,91 @@ static class History
         return l;
     }
 
-    const string Page = @"<!doctype html><html lang=fr><meta charset=utf-8><title>Historique MoniteurJeu</title>
-<style>body{background:#18181c;color:#ddd;font:14px 'Segoe UI',sans-serif;margin:20px;max-width:1100px}h1{font-size:20px}h2{font-size:15px;margin:26px 0 6px}
-canvas{width:100%;height:240px;background:#202026;border-radius:6px;display:block}.k{color:#aaa;font-size:12px;margin-bottom:6px}.k b{display:inline-block;width:10px;height:10px;margin:0 4px 0 12px}
-table{border-collapse:collapse;font-size:13px}td,th{padding:4px 10px;border-bottom:1px solid #333;text-align:right}th{color:#aaa;font-weight:600}</style>
-<h1>Historique MoniteurJeu</h1>
-<h2>Dernières 24 heures (par minute)</h2><div class=k id=k1></div><canvas id=c1></canvas>
-<h2>7 derniers jours (moyenne %, max °C, temps de jeu en heures ×10)</h2><div class=k id=k2></div><canvas id=c2></canvas>
-<h2>Sessions de jeu</h2><table><tr><th>Début<th>Durée (min)<th>Jeu<th>FPS moy.<th>CPU max °C<th>GPU max °C<th>Bridé (s)<th>Alertes</tr><!--S--></table>
+    const string Page = @"<!doctype html><html lang=fr><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'><title>Historique · MoniteurJeu</title>
+<style>
+:root{--bg:#0e1016;--card:#161922;--line:#272c39;--field:#1c202b;--hover:#232837;--text:#e9ecf2;--muted:#8a90a2}
+*{box-sizing:border-box}body{background:var(--bg);color:var(--text);font:14px 'Segoe UI',system-ui,sans-serif;margin:0;padding:32px 24px}
+main{max-width:1120px;margin:auto}header{margin-bottom:24px}h1{font-family:'Segoe UI Semibold','Segoe UI',sans-serif;font-size:28px;margin:0}header p{margin:4px 0 0;color:var(--muted)}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin-bottom:16px}
+.stat,.card{background:var(--card);border:1px solid var(--line);border-radius:14px}
+.stat{padding:14px 16px}.stat span{color:var(--muted);font-size:12px}.stat b{display:block;font-family:'Segoe UI Semibold','Segoe UI',sans-serif;font-size:26px;margin-top:4px}
+.card{padding:18px 20px;margin-bottom:16px}.head{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:12px}
+h2{font-family:'Segoe UI Semibold','Segoe UI',sans-serif;font-size:16px;margin:0}.k{color:var(--muted);font-size:12px;flex:1}
+.k i,.tip i{display:inline-block;width:8px;height:8px;border-radius:50%;margin:0 6px 0 14px}.tip i{margin-left:0}
+.seg{background:var(--field);border-radius:9px;padding:3px;display:flex}.seg button{background:none;border:0;color:var(--muted);font:600 12px 'Segoe UI',sans-serif;padding:6px 14px;border-radius:7px;cursor:pointer}
+.seg button.on{background:var(--hover);color:var(--text)}.seg button:hover{color:var(--text)}
+.wrap{position:relative}canvas{width:100%;height:260px;display:block}
+.tip{position:absolute;top:8px;pointer-events:none;background:#0e1016ee;border:1px solid var(--line);border-radius:10px;padding:8px 12px;font-size:12px;white-space:nowrap;display:none;line-height:1.7}
+table{width:100%;border-collapse:collapse;font-size:13px}th{color:var(--muted);font-weight:600;text-align:left;padding:8px 10px;border-bottom:1px solid var(--line);white-space:nowrap}
+td{padding:9px 10px;border-bottom:1px solid var(--line)}tbody tr:last-child td{border:0}tbody tr:hover{background:var(--hover)}td:nth-child(3){font-weight:600}
+.empty{color:var(--muted);padding:32px;text-align:center}
+</style>
+<main><header><h1>Historique</h1><p>MoniteurJeu · généré le <span id=gen></span></p></header>
+<div class=stats id=stats></div>
+<section class=card><div class=head><h2>Dernières 24 heures</h2><div class=k id=c1k></div><div class=seg id=c1s></div></div><div class=wrap><canvas id=c1></canvas><div class=tip id=c1t></div></div></section>
+<section class=card><div class=head><h2>7 derniers jours</h2><div class=k id=c2k></div><div class=seg id=c2s></div></div><div class=wrap><canvas id=c2></canvas><div class=tip id=c2t></div></div></section>
+<section class=card><div class=head><h2>Sessions de jeu</h2></div><div style=overflow-x:auto><table><thead><tr><th>Début<th>Durée (min)<th>Jeu<th>FPS moy.<th>CPU max °C<th>GPU max °C<th>Bridé (s)<th>Alertes</thead><tbody><!--S--></tbody></table></div></section></main>
 <script>
 const D=/*D*/;
-const C=['#50a0ff','#5ad278','#ffaa3c','#f05050','#999','#c080ff'];
-function key(id,names){document.getElementById(id).innerHTML=names.map((n,i)=>'<b style=background:'+C[i]+'></b>'+n).join('')}
-function draw(id,xs,ys,label,gap){const c=document.getElementById(id),r=devicePixelRatio||1,w=c.clientWidth,h=c.clientHeight;c.width=w*r;c.height=h*r;
- const g=c.getContext('2d');g.scale(r,r);g.font='11px Segoe UI';const L=30,B=18,x0=xs[0],x1=xs[xs.length-1];
- const X=v=>L+(w-L-10)*(x1>x0?(v-x0)/(x1-x0):.5),Y=v=>h-B-(h-B-8)*Math.min(v,100)/100;
- g.strokeStyle='#333';g.fillStyle='#888';for(let v=0;v<=100;v+=25){g.beginPath();g.moveTo(L,Y(v));g.lineTo(w-10,Y(v));g.stroke();g.fillText(v,4,Y(v)+4)}
- let last=-1e9;xs.forEach((x,i)=>{const t=label(x,i);if(t&&X(x)-last>40){g.fillText(t,X(x)-10,h-4);last=X(x)}});
- ys.forEach((s,j)=>{g.strokeStyle=C[j];g.lineWidth=1.5;g.beginPath();let on=false;
-  s.forEach((v,i)=>{if(v==null||(i&&xs[i]-xs[i-1]>gap)){on=false;if(v==null)return}if(on)g.lineTo(X(xs[i]),Y(v));else{g.moveTo(X(xs[i]),Y(v));on=true}});g.stroke()})}
-const now=D.length?D[D.length-1][0]:0,d1=D.filter(r=>r[0]>now-1440);
-const hh=m=>{const d=new Date(m*60000);return d.getUTCMinutes()<2?d.getUTCHours()+'h':''};
-key('k1',['CPU %','GPU %','CPU °C','GPU °C','RAM %']);
-if(d1.length)draw('c1',d1.map(r=>r[0]),[1,4,2,5,3].map(k=>d1.map(r=>r[k])),hh,5);
-const days={};D.forEach(r=>{const k=Math.floor(r[0]/1440);(days[k]=days[k]||[]).push(r)});
-const ks=Object.keys(days).map(Number).sort((a,b)=>a-b).slice(-7);
+const $=id=>document.getElementById(id),pad=n=>String(n).padStart(2,'0');
 const avg=(a,k)=>{const v=a.map(r=>r[k]).filter(x=>x!=null);return v.length?v.reduce((s,x)=>s+x,0)/v.length:null};
 const max=(a,k)=>{const v=a.map(r=>r[k]).filter(x=>x!=null);return v.length?Math.max(...v):null};
-key('k2',['CPU % moy.','GPU % moy.','CPU °C max','GPU °C max','RAM % moy.','Jeu (h ×10)']);
-const J=['dim','lun','mar','mer','jeu','ven','sam'];
-if(ks.length)draw('c2',ks,[ks.map(k=>avg(days[k],1)),ks.map(k=>avg(days[k],4)),ks.map(k=>max(days[k],2)),ks.map(k=>max(days[k],5)),ks.map(k=>avg(days[k],3)),
- ks.map(k=>days[k].filter(r=>r[6]).length/6)],k=>{const d=new Date(k*86400000);return J[d.getUTCDay()]+' '+d.getUTCDate()},1);
+const fmt=(v,u)=>v==null?'—':Math.round(v)+u;
+$('gen').textContent=new Date().toLocaleString('fr-FR',{dateStyle:'long',timeStyle:'short'});
+
+const now=D.length?D[D.length-1][0]:0,d1=D.filter(r=>r[0]>now-1440),play=D.filter(r=>r[6]).length;
+$('stats').innerHTML=[['CPU moyen · 24 h',fmt(avg(d1,1),' %'),'#4f8cff'],['GPU moyen · 24 h',fmt(avg(d1,4),' %'),'#34d399'],['RAM moyenne · 24 h',fmt(avg(d1,3),' %'),'#a78bfa'],
+ ['CPU max · 24 h',fmt(max(d1,2),' °C'),'#fbbf24'],['GPU max · 24 h',fmt(max(d1,5),' °C'),'#f43f5e'],['Temps de jeu · 7 j',Math.floor(play/60)+' h '+pad(play%60),'#e9ecf2']]
+ .map(s=>'<div class=stat><span>'+s[0]+'</span><b style=color:'+s[2]+'>'+s[1]+'</b></div>').join('');
+
+// Courbes en aire avec dégradé ; un écart > gap entre deux points coupe la courbe.
+function chart(cv,xs,series,o){
+ const r=devicePixelRatio||1,w=cv.clientWidth,h=cv.clientHeight;cv.width=w*r;cv.height=h*r;
+ const g=cv.getContext('2d');g.setTransform(r,0,0,r,0,0);g.font='12px Segoe UI';g.fillStyle='#8a90a2';
+ if(!xs.length){g.textAlign='center';g.fillText('Pas encore de données',w/2,h/2);return null}
+ const L=46,R=12,T=10,B=26,x0=xs[0],x1=xs[xs.length-1],M=o.max;
+ const X=v=>L+(w-L-R)*(x1>x0?(v-x0)/(x1-x0):.5),Y=v=>h-B-(h-B-T)*Math.min(v,M)/M;
+ g.strokeStyle='#272c39';g.setLineDash([3,4]);
+ for(let i=0;i<=4;i++){const v=M*i/4;g.beginPath();g.moveTo(L,Y(v));g.lineTo(w-R,Y(v));g.stroke();g.fillText(Math.round(v*10)/10+o.unit,2,Y(v)+4)}
+ g.setLineDash([]);
+ let last=-1e9;xs.forEach(x=>{const t=o.label(x);if(t&&X(x)-last>56){g.fillText(t,X(x)-12,h-6);last=X(x)}});
+ series.forEach(s=>{let seg=[];
+  const path=()=>{g.beginPath();seg.forEach((p,i)=>i?g.lineTo(p[0],p[1]):g.moveTo(p[0],p[1]))};
+  const flush=()=>{if(seg.length==1){g.fillStyle=s.c;g.beginPath();g.arc(seg[0][0],seg[0][1],3,0,7);g.fill()}
+   if(seg.length>1){const gr=g.createLinearGradient(0,T,0,h-B);gr.addColorStop(0,s.c+'55');gr.addColorStop(1,s.c+'00');
+    path();g.lineTo(seg[seg.length-1][0],h-B);g.lineTo(seg[0][0],h-B);g.closePath();g.fillStyle=gr;g.fill();
+    path();g.strokeStyle=s.c;g.lineWidth=2;g.lineJoin='round';g.stroke()}seg=[]};
+  s.v.forEach((v,i)=>{if(v==null||(i&&xs[i]-xs[i-1]>o.gap))flush();if(v!=null)seg.push([X(xs[i]),Y(v)])});flush()});
+ if(o.hover!=null){const x=X(xs[o.hover]);g.strokeStyle='#8a90a2';g.beginPath();g.moveTo(x,T);g.lineTo(x,h-B);g.stroke();
+  series.forEach(s=>{const v=s.v[o.hover];if(v!=null){g.fillStyle=s.c;g.strokeStyle='#161922';g.lineWidth=2;g.beginPath();g.arc(x,Y(v),5,0,7);g.fill();g.stroke()}})}
+ return X}
+
+// Carte de graphique : onglets, légende, info-bulle au survol.
+function panel(id,xs,sets,label,tipLabel,gap){
+ const cv=$(id),tip=$(id+'t'),names=Object.keys(sets);let cur=names[0],hov=null,X=null;
+ $(id+'s').innerHTML=names.map(n=>'<button>'+n+'</button>').join('');
+ const btns=[...$(id+'s').children];
+ const draw=()=>{const s=sets[cur];btns.forEach(b=>b.className=b.textContent==cur?'on':'');
+  $(id+'k').innerHTML=s.series.map(z=>'<i style=background:'+z.c+'></i>'+z.n).join('');
+  X=chart(cv,xs,s.series,{gap:gap,label:label,max:s.max,unit:s.unit,hover:hov})};
+ btns.forEach(b=>b.onclick=()=>{cur=b.textContent;draw()});
+ cv.onmousemove=e=>{if(!X)return;let bi=0,bd=1e9;xs.forEach((x,i)=>{const d=Math.abs(X(x)-e.offsetX);if(d<bd){bd=d;bi=i}});
+  const s=sets[cur];if(bi!==hov){hov=bi;draw()}
+  tip.innerHTML='<div style=color:var(--muted)>'+tipLabel(xs[bi])+'</div>'+s.series.map(z=>'<div><i style=background:'+z.c+'></i>'+z.n+' <b>'+(z.v[bi]==null?'—':Math.round(z.v[bi]*10)/10+' '+s.unit)+'</b></div>').join('');
+  tip.style.display='block';const tx=X(xs[bi]);tip.style.left=(tx+tip.offsetWidth+20>cv.clientWidth?tx-tip.offsetWidth-12:tx+12)+'px'};
+ cv.onmouseleave=()=>{hov=null;tip.style.display='none';draw()};
+ addEventListener('resize',draw);draw()}
+
+const t1=d1.map(r=>r[0]),c1=k=>d1.map(r=>r[k]),hm=m=>{const d=new Date(m*60000);return pad(d.getUTCHours())+':'+pad(d.getUTCMinutes())};
+panel('c1',t1,{'Charge':{max:100,unit:'%',series:[{n:'CPU',c:'#4f8cff',v:c1(1)},{n:'GPU',c:'#34d399',v:c1(4)},{n:'RAM',c:'#a78bfa',v:c1(3)}]},
+ 'Températures':{max:100,unit:'°C',series:[{n:'CPU',c:'#fbbf24',v:c1(2)},{n:'GPU',c:'#f43f5e',v:c1(5)}]}},
+ m=>{const d=new Date(m*60000);return d.getUTCMinutes()<2?d.getUTCHours()+'h':''},hm,5);
+
+const days={};D.forEach(r=>{const k=Math.floor(r[0]/1440);(days[k]=days[k]||[]).push(r)});
+const ks=Object.keys(days).map(Number).sort((a,b)=>a-b).slice(-7),J=['dim.','lun.','mar.','mer.','jeu.','ven.','sam.'];
+const dl=k=>{const d=new Date(k*86400000);return J[d.getUTCDay()]+' '+d.getUTCDate()},hours=ks.map(k=>days[k].filter(r=>r[6]).length/60);
+panel('c2',ks,{'Charge moyenne':{max:100,unit:'%',series:[{n:'CPU',c:'#4f8cff',v:ks.map(k=>avg(days[k],1))},{n:'GPU',c:'#34d399',v:ks.map(k=>avg(days[k],4))},{n:'RAM',c:'#a78bfa',v:ks.map(k=>avg(days[k],3))}]},
+ 'Températures max':{max:100,unit:'°C',series:[{n:'CPU',c:'#fbbf24',v:ks.map(k=>max(days[k],2))},{n:'GPU',c:'#f43f5e',v:ks.map(k=>max(days[k],5))}]},
+ 'Temps de jeu':{max:Math.max(1,Math.ceil(Math.max(0,...hours))),unit:'h',series:[{n:'Jeu',c:'#e9ecf2',v:hours}]}},dl,dl,1);
 </script>";
-}
-
-sealed class StatsForm : Form
-{
-    readonly App app;
-    readonly Font big = new Font("Segoe UI", 11f), small = new Font("Segoe UI", 8.5f);
-    static readonly Color Bg = Color.FromArgb(24, 24, 28), Grid = Color.FromArgb(55, 55, 62);
-    static readonly Color CCpu = Color.FromArgb(80, 160, 255), CGpu = Color.FromArgb(90, 210, 120),
-        CCpuT = Color.FromArgb(255, 170, 60), CGpuT = Color.FromArgb(240, 80, 80);
-
-    public StatsForm(App a)
-    {
-        app = a;
-        Text = "MoniteurJeu";
-        FormBorderStyle = FormBorderStyle.FixedToolWindow;
-        StartPosition = FormStartPosition.Manual;
-        ClientSize = new Size(380, 290);
-        var wa = Screen.PrimaryScreen.WorkingArea;
-        Location = new Point(wa.Right - Width - 12, wa.Bottom - Height - 12);
-        BackColor = Bg; ForeColor = Color.White;
-        DoubleBuffered = true; TopMost = true; ShowInTaskbar = false;
-    }
-
-    protected override void OnPaint(PaintEventArgs e)
-    {
-        var g = e.Graphics;
-        g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
-        int y = 10;
-        Line(g, ref y, CCpu, "CPU", (int)app.Cpu + " %" + (app.CpuT >= 0 ? "   " + (int)app.CpuT + " °C" : "") + (app.CpuThrottle ? "   BRIDÉ" : ""));
-        Line(g, ref y, Color.Silver, "RAM", (int)app.Ram + " %   (" + app.RamUsedGo.ToString("0.0") + " / " + app.RamTotGo.ToString("0.0") + " Go)" + (app.Battery ? "   batterie" : ""));
-        Line(g, ref y, CGpu, "GPU", (app.Gpu >= 0 ? (int)app.Gpu + " %   " + (int)app.GpuT + " °C" : "non disponible") + (app.GpuThrottle ? "   BRIDÉ" : ""));
-        Line(g, ref y, app.GameName != null ? CGpuT : Color.Gray, "Jeu", app.GameName != null ? app.GameName + (app.FpsVal >= 0 ? "   " + (int)app.FpsVal + " FPS" : "") : "mode jeu en attente");
-
-        var r = new Rectangle(10, y + 6, ClientSize.Width - 20, ClientSize.Height - y - 34);
-        using (var p = new Pen(Grid))
-        {
-            g.DrawRectangle(p, r);
-            for (int i = 1; i < 4; i++) g.DrawLine(p, r.Left, r.Top + r.Height * i / 4, r.Right, r.Top + r.Height * i / 4);
-        }
-        Series(g, r, app.HCpu, CCpu); Series(g, r, app.HGpu, CGpu); Series(g, r, app.HCpuT, CCpuT); Series(g, r, app.HGpuT, CGpuT);
-
-        int x = 10, ly = ClientSize.Height - 20;
-        x = Legend(g, x, ly, CCpu, "CPU %"); x = Legend(g, x, ly, CGpu, "GPU %");
-        x = Legend(g, x, ly, CCpuT, "CPU °C"); Legend(g, x, ly, CGpuT, "GPU °C");
-    }
-
-    void Line(Graphics g, ref int y, Color c, string label, string value)
-    {
-        using (var b = new SolidBrush(c)) g.DrawString(label, big, b, 10, y);
-        g.DrawString(value, big, Brushes.White, 60, y);
-        y += 24;
-    }
-
-    int Legend(Graphics g, int x, int y, Color c, string t)
-    {
-        using (var b = new SolidBrush(c)) g.FillRectangle(b, x, y + 4, 10, 10);
-        g.DrawString(t, small, Brushes.Silver, x + 13, y);
-        return x + 20 + (int)g.MeasureString(t, small).Width;
-    }
-
-    // Courbe des 300 dernières mesures, échelle 0-100 (% ou °C)
-    void Series(Graphics g, Rectangle r, float[] h, Color c)
-    {
-        int n = h.Length;
-        using (var p = new Pen(c, 1.5f))
-        {
-            PointF prev = PointF.Empty; bool has = false;
-            for (int i = 0; i < n; i++)
-            {
-                float v = h[(app.Head + i) % n];
-                if (v < 0) { has = false; continue; }
-                var pt = new PointF(r.Left + (float)r.Width * i / (n - 1), r.Bottom - r.Height * Math.Min(v, 100) / 100f);
-                if (has) g.DrawLine(p, prev, pt);
-                prev = pt; has = true;
-            }
-        }
-    }
-
-    protected override void Dispose(bool disposing)
-    {
-        if (disposing) { big.Dispose(); small.Dispose(); }
-        base.Dispose(disposing);
-    }
 }
